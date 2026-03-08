@@ -1,0 +1,980 @@
+/*
+ * Op-Amp Testing Suite v8.0 - Standardized +12V/0/-12V Supply
+ * Arduino Nano - Simple Functionality Test
+ * 
+ * STANDARD POWER SUPPLY:
+ * - Single Supply Op-Amps: +12V & 0V (GND)
+ * - Dual Supply Op-Amps: +12V, 0V (GND), -12V
+ * 
+ * Keuntungan:
+ * - Voltage konsisten → Gain konsisten
+ * - Tidak ada confusion dengan power supply berbeda
+ * - Mudah mapping voltage ke gain
+ * - Akurat untuk bandingkan hasil
+ * 
+ * Author: spektrakomunikasi
+ * Date: 2026-03-08
+ * Version: 8.0 - Standardized 12V Supply
+ */
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <math.h>
+
+// ===== LCD (20x4) =====
+#define LCD_ADDR 0x27
+#define LCD_COLS 20
+#define LCD_ROWS 4
+
+LiquidCrystal_I2C lcd(LCD_ADDR, LCD_COLS, LCD_ROWS);
+
+// ===== ARDUINO PINS =====
+#define OUT_CH1     3   // PWM - test signal
+#define OUT_CH2     5   // PWM - optional
+#define OUT_CH3     6   // PWM - optional
+#define OUT_CH4     9   // PWM - optional
+
+#define IN_CH1      A0  // ADC - read output
+#define IN_CH2      A1  // ADC - optional
+#define IN_CH3      A2  // ADC - optional
+#define IN_CH4      A3  // ADC - optional
+
+#define BTN_START   2   // Start / Select
+#define BTN_NEXT    4   // Next
+#define BTN_PREV    7   // Previous
+#define BTN_MENU    8   // Back
+
+#define LED_OK      13  // Green
+#define LED_FAIL    12  // Red
+
+// ===== CONSTANTS =====
+#define VREF        5.0
+#define ADC_BITS    1023.0
+
+// ===== STANDARDIZED POWER SUPPLY =====
+enum PowerSupply {
+  PS_SINGLE_12V,    // +12V, 0V (single supply)
+  PS_DUAL_12V       // +12V, 0V, -12V (dual supply)
+};
+
+// ===== GAIN OPTIONS =====
+const float gain_options[] = {1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0};
+const char* gain_labels[] = {"1x", "2x", "5x", "10x", "20x", "50x", "100x"};
+#define NUM_GAINS 7
+
+// ===== EXTENDED OP-AMP DATABASE WITH SUPPLY TYPE =====
+struct OpAmpSpec {
+  char name[20];
+  int pin_count;
+  PowerSupply supply_type;   // Single or Dual
+  float max_offset_mv;
+  float typical_vcc_pos;     // Typical +V (akan pakai +12V)
+  float typical_vcc_neg;     // Typical -V (akan pakai 0V atau -12V)
+  float max_output_swing;    // % dari rail
+  float min_output_swing;    // Minimum % yang bisa dicapai
+  int max_freq;
+  char type[20];
+};
+
+// Database dengan standardisasi 12V
+OpAmpSpec opamp_specs[] = {
+  // SINGLE SUPPLY (5V pada spec, tapi kita pakai 12V) - 8PIN
+  {"LM358",     8, PS_SINGLE_12V, 50.0,  12.0,  0.0,  10.0, 2.0,  1000, "General"},
+  {"LM358A",    8, PS_SINGLE_12V, 50.0,  12.0,  0.0,  10.0, 2.0,  1000, "General"},
+  {"LM2904",    8, PS_SINGLE_12V, 50.0,  12.0,  0.0,  10.0, 2.0,  1000, "General"},
+  {"OPA2333",   8, PS_SINGLE_12V, 50.0,  12.0,  0.0,  10.0, 2.0,  1000, "Audio"},
+  {"NE8072",    8, PS_SINGLE_12V, 50.0,  12.0,  0.0,  10.0, 2.0,  1000, "Audio"},
+  {"LM386",     8, PS_SINGLE_12V, 100.0, 12.0,  0.0,   8.0, 1.0, 100k, "Audio"},
+  
+  // DUAL SUPPLY - 8PIN
+  {"LM741",     8, PS_DUAL_12V, 100.0, 12.0, -12.0, 10.0, 2.0,  1000, "General"},
+  {"LM307",     8, PS_DUAL_12V, 50.0,  12.0, -12.0, 10.0, 2.0,  500,  "General"},
+  {"LM308",     8, PS_DUAL_12V, 100.0, 12.0, -12.0, 10.0, 2.0,  1000, "General"},
+  {"TL071",     8, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  100k, "Audio"},
+  {"TL072",     8, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  100k, "Audio"},
+  {"TL074",     8, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  100k, "Audio"},
+  {"TL082",     8, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  1000, "General"},
+  {"TL084",     8, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  1000, "General"},
+  {"NE5532",    8, PS_DUAL_12V, 20.0,  12.0, -12.0, 11.0, 1.5,  100k, "Audio"},
+  {"NE5534",    8, PS_DUAL_12V, 20.0,  12.0, -12.0, 11.0, 1.5,  100k, "Audio"},
+  {"OP07",      8, PS_DUAL_12V, 5.0,   12.0, -12.0, 11.0, 1.5,  1000, "Precision"},
+  {"OP27",      8, PS_DUAL_12V, 3.0,   12.0, -12.0, 11.0, 1.5,  1000, "Precision"},
+  {"LT1057",    8, PS_DUAL_12V, 5.0,   12.0, -12.0, 11.0, 1.5,  1000, "Precision"},
+  {"LT1058",    8, PS_DUAL_12V, 5.0,   12.0, -12.0, 11.0, 1.5,  1000, "Precision"},
+  {"OPA1656",   8, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  10M,  "Audio"},
+  {"OPA2107",   8, PS_DUAL_12V, 5.0,   12.0, -12.0, 11.0, 1.5,  1000, "Precision"},
+  {"OPA2134",   8, PS_DUAL_12V, 10.0,  12.0, -12.0, 11.0, 1.5,  100k, "Audio"},
+  {"OPA2133",   8, PS_DUAL_12V, 10.0,  12.0, -12.0, 11.0, 1.5,  100k, "Audio"},
+  {"OPA2228",   8, PS_DUAL_12V, 20.0,  12.0, -12.0, 11.0, 1.5,  1000, "Audio"},
+  {"OPA2277",   8, PS_DUAL_12V, 10.0,  12.0, -12.0, 11.0, 1.5,  100k, "Audio"},
+  {"CA3140",    8, PS_DUAL_12V, 30.0,  12.0, -12.0, 11.0, 1.5,  10M,  "HighZ"},
+  {"CA3130",    8, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  1000, "HighZ"},
+  {"LM833",     8, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  1000, "Audio"},
+  {"MC1458",    8, PS_DUAL_12V, 100.0, 12.0, -12.0, 10.0, 2.0,  1000, "General"},
+  {"NE5228",    8, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  1000, "Audio"},
+  
+  // QUAD - 14PIN
+  {"LM324",     14, PS_SINGLE_12V, 50.0, 12.0,  0.0,  10.0, 2.0,  1000, "General"},
+  {"LM2902",    14, PS_SINGLE_12V, 50.0, 12.0,  0.0,  10.0, 2.0,  1000, "General"},
+  {"LM3900",    14, PS_SINGLE_12V, 100.0,12.0,  0.0,   8.0, 1.5,  1000, "General"},
+  {"TL074",     14, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  100k, "Audio"},
+  {"TL084",     14, PS_DUAL_12V, 50.0,  12.0, -12.0, 11.0, 1.5,  1000, "General"},
+};
+
+int num_specs = 35;
+int selected_opamp = 0;
+int selected_channel = 0;
+int selected_gain_idx = 0;
+
+// ===== VOLTAGE MAPPING TABLE (berdasarkan PWM 0-255) =====
+// PWM 0-255 akan map ke voltage berdasarkan supply
+// Untuk standardisasi, kita pakai resistor voltage divider di Arduino output
+float mapPWMtoVoltage(int pwm, PowerSupply ps_type) {
+  // PWM 0-255 → 0-5V (Arduino output)
+  float pwm_voltage = (pwm / 255.0) * 5.0;
+  
+  // Untuk op-amp input, kita voltage divide untuk stay dalam range
+  // Single supply: 0-6V input (middle di 6V = +12V rail reference)
+  // Dual supply: -6V to +6V input (middle di 0V = GND reference)
+  
+  if (ps_type == PS_SINGLE_12V) {
+    // Map PWM 0-5V ke -6V to +6V range (centered at +6V for +12V rail)
+    // PWM 0 = 0V (0 bias on op-amp)
+    // PWM 127 = 2.5V (middle, +6V input for +12V supply)
+    // PWM 255 = 5V (+12V reference)
+    return pwm_voltage * 1.2;  // Scale by 1.2 untuk range 0-6V
+  } else {
+    // Dual supply: map to -6V to +6V (centered at GND)
+    // PWM 0 = 0V → -6V equivalent (referensi -12V)
+    // PWM 127 = 2.5V → 0V (GND)
+    // PWM 255 = 5V → +6V (referensi +12V)
+    return (pwm_voltage - 2.5) * 2.4;  // Scale by 2.4 untuk range ±6V
+  }
+}
+
+// ===== EXPECTED OUTPUT CALCULATION =====
+float calculateExpectedOutput(float input_voltage, float gain, PowerSupply ps_type) {
+  float output = input_voltage * gain;
+  
+  // Clamp to rail limits (dengan 1V headroom)
+  if (ps_type == PS_SINGLE_12V) {
+    // Single supply: 0V to +11V (12V - 1V headroom)
+    if (output < 0.5) output = 0.5;
+    if (output > 11.0) output = 11.0;
+  } else {
+    // Dual supply: -11V to +11V
+    if (output < -11.0) output = -11.0;
+    if (output > 11.0) output = 11.0;
+  }
+  
+  return output;
+}
+
+// ===== TEST STATES =====
+enum TestState {
+  STATE_MENU,
+  STATE_SELECT_OPAMP,
+  STATE_SELECT_CHANNELS,
+  STATE_SELECT_GAIN,
+  STATE_SUPPLY_INFO,
+  STATE_READY,
+  STATE_TESTING,
+  STATE_RESULT_PASS,
+  STATE_RESULT_FAIL,
+  STATE_MEASURE_OUTPUT,
+  STATE_HISTORY
+};
+
+TestState current_state = STATE_MENU;
+
+// ===== TEST RESULT =====
+struct TestResult {
+  char opamp_name[20];
+  int channel;
+  float gain_set;
+  float supply_pos;
+  float supply_neg;
+  float vin;
+  float vout_measured;
+  float vout_expected;
+  float offset_mv;
+  float dB_gain;
+  bool passed;
+  unsigned long timestamp;
+};
+
+#define MAX_RESULTS 30
+TestResult test_history[MAX_RESULTS];
+int result_count = 0;
+
+// ===== UI STATE =====
+unsigned long last_btn_time = 0;
+#define DEBOUNCE 50
+int active_channels = 1;
+float selected_gain = 1.0;
+PowerSupply current_ps;
+int menu_selection = 0;  // 0=Test, 1=Measure, 2=History
+
+// ===== SETUP =====
+void setup() {
+  Serial.begin(9600);
+  
+  lcd.init();
+  lcd.backlight();
+  
+  pinMode(OUT_CH1, OUTPUT);
+  pinMode(OUT_CH2, OUTPUT);
+  pinMode(OUT_CH3, OUTPUT);
+  pinMode(OUT_CH4, OUTPUT);
+  
+  pinMode(BTN_START, INPUT_PULLUP);
+  pinMode(BTN_NEXT, INPUT_PULLUP);
+  pinMode(BTN_PREV, INPUT_PULLUP);
+  pinMode(BTN_MENU, INPUT_PULLUP);
+  
+  pinMode(LED_OK, OUTPUT);
+  pinMode(LED_FAIL, OUTPUT);
+  
+  analogWrite(OUT_CH1, 0);
+  analogWrite(OUT_CH2, 0);
+  analogWrite(OUT_CH3, 0);
+  analogWrite(OUT_CH4, 0);
+  
+  displaySplash();
+  delay(2000);
+  
+  current_state = STATE_MENU;
+}
+
+// ===== MAIN LOOP =====
+void loop() {
+  checkButtons();
+  
+  switch(current_state) {
+    case STATE_MENU:
+      displayMenu();
+      break;
+    case STATE_SELECT_OPAMP:
+      displaySelectOpAmp();
+      break;
+    case STATE_SELECT_CHANNELS:
+      displaySelectChannels();
+      break;
+    case STATE_SELECT_GAIN:
+      displaySelectGain();
+      break;
+    case STATE_SUPPLY_INFO:
+      displaySupplyInfo();
+      break;
+    case STATE_READY:
+      displayReady();
+      break;
+    case STATE_TESTING:
+      runTest();
+      break;
+    case STATE_RESULT_PASS:
+      displayResultPass();
+      break;
+    case STATE_RESULT_FAIL:
+      displayResultFail();
+      break;
+    case STATE_MEASURE_OUTPUT:
+      displayMeasureOutput();
+      break;
+    case STATE_HISTORY:
+      displayHistory();
+      break;
+  }
+  
+  delay(50);
+}
+
+// ===== DISPLAY FUNCTIONS =====
+void displaySplash() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("  OP-AMP TESTER v8.0");
+  lcd.setCursor(0, 1);
+  lcd.print("  Standardized Supply");
+  lcd.setCursor(0, 2);
+  lcd.print("  +12V / 0V / -12V");
+  lcd.setCursor(0, 3);
+  lcd.print("  35+ Op-Amps Supported");
+}
+
+void displayMenu() {
+  static unsigned long last_update = 0;
+  
+  if (millis() - last_update > 300) {
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("=== MAIN MENU ===");
+    lcd.setCursor(0, 1);
+    lcd.print("[");
+    lcd.print(menu_selection == 0 ? "*" : " ");
+    lcd.print("] Test Op-Amp");
+    
+    lcd.setCursor(0, 2);
+    lcd.print("[");
+    lcd.print(menu_selection == 1 ? "*" : " ");
+    lcd.print("] Measure Output");
+    
+    lcd.setCursor(0, 3);
+    lcd.print("[");
+    lcd.print(menu_selection == 2 ? "*" : " ");
+    lcd.print("] View History");
+    
+    last_update = millis();
+  }
+}
+
+void displaySelectOpAmp() {
+  static unsigned long last_update = 0;
+  
+  if (millis() - last_update > 200) {
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("OP-AMP (");
+    lcd.print(selected_opamp + 1);
+    lcd.print("/");
+    lcd.print(num_specs);
+    lcd.print("):");
+    
+    // Show 3 options
+    for (int i = -1; i <= 1; i++) {
+      int idx = (selected_opamp + i + num_specs) % num_specs;
+      lcd.setCursor(0, i + 2);
+      
+      if (i == 0) {
+        lcd.print(">");
+      } else {
+        lcd.print(" ");
+      }
+      
+      lcd.print(opamp_specs[idx].name);
+      
+      // Show supply type
+      if (opamp_specs[idx].supply_type == PS_SINGLE_12V) {
+        lcd.print(" S");  // Single
+      } else {
+        lcd.print(" D");  // Dual
+      }
+    }
+    
+    last_update = millis();
+  }
+}
+
+void displaySelectChannels() {
+  static unsigned long last_update = 0;
+  
+  if (millis() - last_update > 200) {
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("CHANNELS TO TEST:");
+    
+    lcd.setCursor(0, 1);
+    lcd.print("Selected: ");
+    lcd.print(active_channels);
+    
+    lcd.setCursor(0, 2);
+    if (opamp_specs[selected_opamp].pin_count == 14) {
+      lcd.print("Up to 4 channels avail");
+    } else {
+      lcd.print("Max 1 channel per IC");
+    }
+    
+    lcd.setCursor(0, 3);
+    lcd.print("UP=prev, DOWN=next");
+    
+    last_update = millis();
+  }
+}
+
+void displaySelectGain() {
+  static unsigned long last_update = 0;
+  
+  if (millis() - last_update > 200) {
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("SELECT GAIN:");
+    
+    // Show 3 gain options
+    for (int i = -1; i <= 1; i++) {
+      int idx = (selected_gain_idx + i + NUM_GAINS) % NUM_GAINS;
+      lcd.setCursor(0, i + 1);
+      
+      if (i == 0) {
+        lcd.print(">");
+      } else {
+        lcd.print(" ");
+      }
+      
+      lcd.print(gain_labels[idx]);
+      lcd.print(" = ");
+      float db = 20.0 * log10(gain_options[idx]);
+      lcd.print((int)db);
+      lcd.print("dB");
+    }
+    
+    last_update = millis();
+  }
+}
+
+void displaySupplyInfo() {
+  static unsigned long last_update = 0;
+  
+  if (millis() - last_update > 500) {
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("POWER SUPPLY CONFIG");
+    
+    OpAmpSpec& spec = opamp_specs[selected_opamp];
+    current_ps = spec.supply_type;
+    
+    lcd.setCursor(0, 1);
+    if (spec.supply_type == PS_SINGLE_12V) {
+      lcd.print("Single Supply Mode:");
+      lcd.setCursor(0, 2);
+      lcd.print("VCC+ = +12V");
+      lcd.setCursor(0, 3);
+      lcd.print("GND  = 0V");
+    } else {
+      lcd.print("Dual Supply Mode:");
+      lcd.setCursor(0, 2);
+      lcd.print("VCC+ = +12V, GND = 0V");
+      lcd.setCursor(0, 3);
+      lcd.print("VCC- = -12V");
+    }
+    
+    last_update = millis();
+  }
+}
+
+void displayReady() {
+  static unsigned long last_update = 0;
+  
+  if (millis() - last_update > 300) {
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("READY TO TEST");
+    
+    lcd.setCursor(0, 1);
+    lcd.print("Op: ");
+    lcd.print(opamp_specs[selected_opamp].name);
+    lcd.print(" ");
+    lcd.print(gain_labels[selected_gain_idx]);
+    
+    lcd.setCursor(0, 2);
+    lcd.print("Ch: ");
+    lcd.print(active_channels);
+    lcd.print(" | Gain: ");
+    float db = 20.0 * log10(gain_options[selected_gain_idx]);
+    lcd.print((int)db);
+    lcd.print("dB");
+    
+    lcd.setCursor(0, 3);
+    if (current_ps == PS_SINGLE_12V) {
+      lcd.print("Supply: +12V/0V");
+    } else {
+      lcd.print("Supply: +12V/0V/-12V");
+    }
+    
+    last_update = millis();
+  }
+}
+
+void displayTesting(int progress) {
+  lcd.clear();
+  
+  lcd.setCursor(0, 0);
+  lcd.print("TEST: ");
+  lcd.print(opamp_specs[selected_opamp].name);
+  lcd.print(" Ch");
+  lcd.print(selected_channel + 1);
+  
+  lcd.setCursor(0, 1);
+  lcd.print("Gain: ");
+  lcd.print(gain_labels[selected_gain_idx]);
+  
+  lcd.setCursor(0, 2);
+  lcd.print("Progress: ");
+  int bar = (progress * 10) / 100;
+  for (int i = 0; i < bar; i++) lcd.print("=");
+  for (int i = bar; i < 10; i++) lcd.print("-");
+  
+  lcd.setCursor(0, 3);
+  switch(progress / 25) {
+    case 0: lcd.print("Checking DC offset..."); break;
+    case 1: lcd.print("Measuring gain..."); break;
+    case 2: lcd.print("Testing output swing..."); break;
+    case 3: lcd.print("Verifying response..."); break;
+    case 4: lcd.print("Complete!"); break;
+  }
+}
+
+void displayResultPass() {
+  static unsigned long last_update = 0;
+  
+  if (millis() - last_update > 500) {
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("✓ PASSED - OP-AMP OK!");
+    
+    TestResult& res = test_history[result_count - 1];
+    
+    lcd.setCursor(0, 1);
+    lcd.print(res.opamp_name);
+    lcd.print(" Ch");
+    lcd.print(res.channel);
+    
+    lcd.setCursor(0, 2);
+    lcd.print("Offset:");
+    lcd.print(res.offset_mv, 1);
+    lcd.print("mV Gain:");
+    lcd.print(res.dB_gain, 1);
+    lcd.print("dB");
+    
+    lcd.setCursor(0, 3);
+    lcd.print("Vin:");
+    lcd.print(res.vin, 2);
+    lcd.print("V Vout:");
+    lcd.print(res.vout_measured, 2);
+    lcd.print("V");
+    
+    digitalWrite(LED_OK, HIGH);
+    
+    last_update = millis();
+  }
+}
+
+void displayResultFail() {
+  static unsigned long last_update = 0;
+  
+  if (millis() - last_update > 500) {
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("✗ FAILED - OP-AMP BAD!");
+    
+    TestResult& res = test_history[result_count - 1];
+    
+    lcd.setCursor(0, 1);
+    lcd.print(res.opamp_name);
+    lcd.print(" Ch");
+    lcd.print(res.channel);
+    
+    lcd.setCursor(0, 2);
+    lcd.print("Offset:");
+    lcd.print(res.offset_mv, 1);
+    lcd.print("mV (max:");
+    lcd.print(opamp_specs[selected_opamp].max_offset_mv, 0);
+    lcd.print(")");
+    
+    lcd.setCursor(0, 3);
+    lcd.print("Vout:");
+    lcd.print(res.vout_measured, 2);
+    lcd.print("V Expected:");
+    lcd.print(res.vout_expected, 2);
+    
+    static unsigned long led_time = 0;
+    if (millis() - led_time > 200) {
+      digitalWrite(LED_FAIL, !digitalRead(LED_FAIL));
+      led_time = millis();
+    }
+    
+    last_update = millis();
+  }
+}
+
+void displayMeasureOutput() {
+  static unsigned long last_update = 0;
+  static int sweep_pwm = 0;
+  
+  if (millis() - last_update > 100) {
+    int out_pin = getOutputPin(selected_channel);
+    int in_pin = getInputPin(selected_channel);
+    
+    // Sweep PWM value
+    analogWrite(out_pin, sweep_pwm);
+    delay(50);
+    
+    float v_in = mapPWMtoVoltage(sweep_pwm, current_ps);
+    float v_out = readVoltage(in_pin);
+    float actual_gain = (v_in != 0) ? (v_out / v_in) : 0;
+    float db = (actual_gain > 0) ? 20.0 * log10(actual_gain) : -100;
+    
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("MEASURE: ");
+    lcd.print(opamp_specs[selected_opamp].name);
+    
+    lcd.setCursor(0, 1);
+    lcd.print("Gain Setting: ");
+    lcd.print(gain_labels[selected_gain_idx]);
+    
+    lcd.setCursor(0, 2);
+    lcd.print("Vin:");
+    lcd.print(v_in, 2);
+    lcd.print("V Vout:");
+    lcd.print(v_out, 2);
+    lcd.print("V");
+    
+    lcd.setCursor(0, 3);
+    lcd.print("Actual:");
+    lcd.print((int)actual_gain);
+    lcd.print("x=");
+    lcd.print(db, 1);
+    lcd.print("dB");
+    
+    sweep_pwm = (sweep_pwm + 5) % 256;
+    
+    last_update = millis();
+  }
+}
+
+void displayHistory() {
+  static unsigned long last_update = 0;
+  static int history_page = 0;
+  
+  if (millis() - last_update > 500) {
+    lcd.clear();
+    
+    lcd.setCursor(0, 0);
+    lcd.print("TEST HISTORY (Page ");
+    lcd.print(history_page + 1);
+    lcd.print(")");
+    
+    int start = history_page * 2;
+    
+    if (start < result_count) {
+      lcd.setCursor(0, 1);
+      lcd.print("#");
+      lcd.print(start + 1);
+      lcd.print(": ");
+      lcd.print(test_history[start].opamp_name);
+      lcd.print(" ");
+      lcd.print(test_history[start].passed ? "✓" : "✗");
+      lcd.print(" ");
+      lcd.print(test_history[start].dB_gain, 0);
+      lcd.print("dB");
+    }
+    
+    if (start + 1 < result_count) {
+      lcd.setCursor(0, 2);
+      lcd.print("#");
+      lcd.print(start + 2);
+      lcd.print(": ");
+      lcd.print(test_history[start + 1].opamp_name);
+      lcd.print(" ");
+      lcd.print(test_history[start + 1].passed ? "✓" : "✗");
+      lcd.print(" ");
+      lcd.print(test_history[start + 1].dB_gain, 0);
+      lcd.print("dB");
+    }
+    
+    lcd.setCursor(0, 3);
+    lcd.print("Total: ");
+    lcd.print(result_count);
+    lcd.print(" | UP/DOWN for pages");
+    
+    last_update = millis();
+  }
+}
+
+// ===== BUTTON HANDLER =====
+void checkButtons() {
+  unsigned long now = millis();
+  
+  if (now - last_btn_time < DEBOUNCE) {
+    return;
+  }
+  
+  if (digitalRead(BTN_START) == LOW) {
+    last_btn_time = now;
+    handleStart();
+  }
+  else if (digitalRead(BTN_NEXT) == LOW) {
+    last_btn_time = now;
+    handleNext();
+  }
+  else if (digitalRead(BTN_PREV) == LOW) {
+    last_btn_time = now;
+    handlePrev();
+  }
+  else if (digitalRead(BTN_MENU) == LOW) {
+    last_btn_time = now;
+    handleMenu();
+  }
+}
+
+void handleStart() {
+  digitalWrite(LED_OK, LOW);
+  digitalWrite(LED_FAIL, LOW);
+  
+  switch(current_state) {
+    case STATE_MENU:
+      if (menu_selection == 0) {
+        current_state = STATE_SELECT_OPAMP;
+        selected_opamp = 0;
+      } else if (menu_selection == 1) {
+        current_state = STATE_SELECT_OPAMP;
+        selected_opamp = 0;
+        // Flag untuk measure mode
+      } else if (menu_selection == 2) {
+        current_state = STATE_HISTORY;
+      }
+      break;
+    case STATE_SELECT_OPAMP:
+      current_state = STATE_SELECT_CHANNELS;
+      active_channels = 1;
+      break;
+    case STATE_SELECT_CHANNELS:
+      current_state = STATE_SELECT_GAIN;
+      selected_gain_idx = 0;
+      break;
+    case STATE_SELECT_GAIN:
+      current_state = STATE_SUPPLY_INFO;
+      selected_gain = gain_options[selected_gain_idx];
+      break;
+    case STATE_SUPPLY_INFO:
+      current_state = STATE_READY;
+      break;
+    case STATE_READY:
+      selected_channel = 0;
+      current_state = STATE_TESTING;
+      break;
+    case STATE_RESULT_PASS:
+    case STATE_RESULT_FAIL:
+      if (selected_channel < active_channels - 1) {
+        selected_channel++;
+        current_state = STATE_TESTING;
+      } else {
+        current_state = STATE_MENU;
+      }
+      break;
+    case STATE_MEASURE_OUTPUT:
+      current_state = STATE_MENU;
+      analogWrite(OUT_CH1, 0);
+      analogWrite(OUT_CH2, 0);
+      analogWrite(OUT_CH3, 0);
+      analogWrite(OUT_CH4, 0);
+      break;
+    case STATE_HISTORY:
+      current_state = STATE_MENU;
+      break;
+  }
+}
+
+void handleNext() {
+  switch(current_state) {
+    case STATE_MENU:
+      menu_selection = (menu_selection + 1) % 3;
+      break;
+    case STATE_SELECT_OPAMP:
+      selected_opamp = (selected_opamp + 1) % num_specs;
+      break;
+    case STATE_SELECT_CHANNELS:
+      active_channels = (active_channels % 4) + 1;
+      break;
+    case STATE_SELECT_GAIN:
+      selected_gain_idx = (selected_gain_idx + 1) % NUM_GAINS;
+      break;
+  }
+}
+
+void handlePrev() {
+  switch(current_state) {
+    case STATE_MENU:
+      menu_selection = (menu_selection - 1 + 3) % 3;
+      break;
+    case STATE_SELECT_OPAMP:
+      selected_opamp = (selected_opamp - 1 + num_specs) % num_specs;
+      break;
+    case STATE_SELECT_CHANNELS:
+      active_channels = (active_channels - 2 + 4) % 4 + 1;
+      break;
+    case STATE_SELECT_GAIN:
+      selected_gain_idx = (selected_gain_idx - 1 + NUM_GAINS) % NUM_GAINS;
+      break;
+  }
+}
+
+void handleMenu() {
+  digitalWrite(LED_OK, LOW);
+  digitalWrite(LED_FAIL, LOW);
+  
+  switch(current_state) {
+    case STATE_SELECT_OPAMP:
+      current_state = STATE_MENU;
+      break;
+    case STATE_SELECT_CHANNELS:
+      current_state = STATE_SELECT_OPAMP;
+      break;
+    case STATE_SELECT_GAIN:
+      current_state = STATE_SELECT_CHANNELS;
+      break;
+    case STATE_SUPPLY_INFO:
+      current_state = STATE_SELECT_GAIN;
+      break;
+    case STATE_READY:
+      current_state = STATE_SUPPLY_INFO;
+      break;
+    case STATE_RESULT_PASS:
+    case STATE_RESULT_FAIL:
+      current_state = STATE_MENU;
+      break;
+    case STATE_MEASURE_OUTPUT:
+      current_state = STATE_MENU;
+      analogWrite(OUT_CH1, 0);
+      analogWrite(OUT_CH2, 0);
+      analogWrite(OUT_CH3, 0);
+      analogWrite(OUT_CH4, 0);
+      break;
+    case STATE_HISTORY:
+      current_state = STATE_MENU;
+      break;
+  }
+}
+
+// ===== TEST EXECUTION =====
+void runTest() {
+  int out_pin = getOutputPin(selected_channel);
+  int in_pin = getInputPin(selected_channel);
+  
+  OpAmpSpec& spec = opamp_specs[selected_opamp];
+  TestResult& result = test_history[result_count];
+  
+  strcpy(result.opamp_name, spec.name);
+  result.channel = selected_channel + 1;
+  result.gain_set = selected_gain;
+  result.supply_pos = spec.typical_vcc_pos;
+  result.supply_neg = spec.typical_vcc_neg;
+  result.timestamp = millis();
+  
+  // TEST 1: DC OFFSET (20%)
+  displayTesting(20);
+  delay(500);
+  
+  analogWrite(out_pin, 0);
+  delay(100);
+  
+  float v_no_signal = 0;
+  for (int i = 0; i < 20; i++) {
+    v_no_signal += readVoltage(in_pin);
+    delay(5);
+  }
+  v_no_signal /= 20.0;
+  result.offset_mv = v_no_signal * 1000;
+  
+  // TEST 2: GAIN TEST at set gain (50%)
+  displayTesting(50);
+  delay(500);
+  
+  // Apply 50% PWM (mid-range signal)
+  analogWrite(out_pin, 127);
+  delay(100);
+  float v_out = readVoltage(in_pin);
+  float v_in = mapPWMtoVoltage(127, current_ps);
+  
+  result.vin = v_in;
+  result.vout_measured = v_out;
+  result.vout_expected = calculateExpectedOutput(v_in, selected_gain, current_ps);
+  result.dB_gain = 20.0 * log10((v_in != 0) ? (v_out / v_in) : 1.0);
+  
+  // TEST 3: OUTPUT SWING (75%)
+  displayTesting(75);
+  delay(500);
+  
+  analogWrite(out_pin, 255);
+  delay(50);
+  float v_max = readVoltage(in_pin);
+  
+  analogWrite(out_pin, 0);
+  delay(50);
+  float v_min = readVoltage(in_pin);
+  
+  float output_swing_pct = ((v_max - v_min) / 24.0) * 100.0;  // 24V total range
+  
+  // TEST 4: RESPONSE (90%)
+  displayTesting(90);
+  delay(500);
+  
+  analogWrite(out_pin, 0);
+  delay(10);
+  analogWrite(out_pin, 255);
+  delay(10);
+  float response_check = readVoltage(in_pin);
+  
+  analogWrite(out_pin, 0);
+  
+  // COMPLETE (100%)
+  displayTesting(100);
+  delay(500);
+  
+  // EVALUATE
+  result.passed = true;
+  
+  if (abs(result.offset_mv) > spec.max_offset_mv) {
+    result.passed = false;
+  }
+  
+  if (output_swing_pct < spec.min_output_swing) {
+    result.passed = false;
+  }
+  
+  if (v_max < 1.0 || v_min > 11.0) {
+    result.passed = false;
+  }
+  
+  // Check if output is reasonably close to expected
+  float error_pct = abs(result.vout_measured - result.vout_expected) / result.vout_expected * 100.0;
+  if (error_pct > 30.0) {  // Allow 30% error
+    result.passed = false;
+  }
+  
+  if (result_count < MAX_RESULTS) {
+    result_count++;
+  }
+  
+  delay(500);
+  if (result.passed) {
+    current_state = STATE_RESULT_PASS;
+  } else {
+    current_state = STATE_RESULT_FAIL;
+  }
+}
+
+// ===== HELPER FUNCTIONS =====
+int getOutputPin(int channel) {
+  switch(channel) {
+    case 0: return OUT_CH1;
+    case 1: return OUT_CH2;
+    case 2: return OUT_CH3;
+    case 3: return OUT_CH4;
+  }
+  return OUT_CH1;
+}
+
+int getInputPin(int channel) {
+  switch(channel) {
+    case 0: return IN_CH1;
+    case 1: return IN_CH2;
+    case 2: return IN_CH3;
+    case 3: return IN_CH4;
+  }
+  return IN_CH1;
+}
+
+float readVoltage(int pin) {
+  int raw = analogRead(pin);
+  return (raw / ADC_BITS) * VREF;
+}
